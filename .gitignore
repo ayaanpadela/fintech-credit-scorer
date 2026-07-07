@@ -1,0 +1,27 @@
+# Python & Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual Environments (uv)
+.venv/
+
+# Environment Variables
+.env
+
+# VS Code specific settings
+.vscode/
+
+# Formatting & Linting Caches
+.ruff_cache/
+.mypy_cache/
+.pyrightconfig.json
+
+# Data & ML Artifacts (Critical for your Credit Scorer)
+data/raw/
+data/processed/
+models/
+*.csv
+*.parquet
+*.pkl
+*.joblib
