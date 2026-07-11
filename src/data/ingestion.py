@@ -4,7 +4,7 @@ from typing import Tuple
 
 import pandas as pd
 import numpy as np
-
+import datetime
 # Configure basic logging for telemetry
 logging.basicConfig(level=logging.INFO, format="%(levelname)s - %(message)s")
 
@@ -30,9 +30,11 @@ class DataIngestor:
         # Engineer strict binary target: 1 for Default (CHGOFF), 0 for Paid
         df["is_default"] = np.where(df[self.target_column].str.contains("CHGOFF"), 1, 0)
         
-        # Parse datetime for sorting
+        # Parse datetime for sorting and offset by 100 years for wrongly converted years
         df[self.date_column] = pd.to_datetime(df[self.date_column], format='mixed')
-        
+        current_year= datetime.date.today().year
+        mask= df[self.date_column].dt.year> current_year
+        df.loc[mask, self.date_column]= df.loc[mask,self.date_column]-pd.DateOffset(years=100)
         logging.info(f"Loaded {len(df)} records. Base Default Rate: {df['is_default'].mean():.2%}")
         return df
     
