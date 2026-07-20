@@ -25,3 +25,4 @@ models/
 *.parquet
 *.pkl
 *.joblib
+FinTech Credit Scorer API Guide.md
