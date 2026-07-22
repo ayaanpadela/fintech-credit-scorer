@@ -404,7 +404,7 @@ def build_feature_pipeline() -> Pipeline:
     """
     # --- Transformer instantiation ---
 
-    financial_cols = ["DisbursementGross", "GrAppv", "SBA_Appv"]
+    financial_cols = ["GrAppv", "SBA_Appv"]
     cleaner = FinancialCleaner(columns=financial_cols)
     naics_proc = NAICSProcessor(column="NAICS")
     risk_gen = RiskRatioGenerator()
@@ -441,7 +441,7 @@ def build_feature_pipeline() -> Pipeline:
     # GOV_Ratio is excluded: bounded [0, 1] by construction in RiskRatioGenerator.
     # is_franchise is excluded: binary flag, winsorizing would be a no-op.
     winsorizer = OutlierWinsorizer(
-        columns=["DisbursementGross", "GrAppv", "SBA_Appv", "Term", "NoEmp", "CreateJob", "RetainedJob"],
+        columns=["GrAppv", "SBA_Appv", "Term", "NoEmp", "CreateJob", "RetainedJob"],
         lower_quantile=0.01,
         upper_quantile=0.99,
     )
@@ -450,7 +450,6 @@ def build_feature_pipeline() -> Pipeline:
 
     # Scaled continuous features — post-cleaning and post-winsorization.
     continuous_features = [
-        "DisbursementGross",  # Total gross disbursement amount
         "GrAppv",             # Gross amount approved by bank
         "SBA_Appv",           # Amount guaranteed by SBA
         "GOV_Ratio",          # SBA guarantee proportion (engineered)
@@ -529,7 +528,7 @@ def build_tree_feature_pipeline() -> Pipeline:
         """
         # --- Transformer instantiation (identical to build_feature_pipeline) ---
 
-        financial_cols = ["DisbursementGross", "GrAppv", "SBA_Appv"]
+        financial_cols = ["GrAppv", "SBA_Appv"]
         cleaner = FinancialCleaner(columns=financial_cols)
         naics_proc = NAICSProcessor(column="NAICS")
         risk_gen = RiskRatioGenerator()
@@ -559,7 +558,7 @@ def build_tree_feature_pipeline() -> Pipeline:
         franchise_enc = FranchiseEncoder(column="FranchiseCode", threshold=1)
 
         winsorizer = OutlierWinsorizer(
-            columns=["DisbursementGross", "GrAppv", "SBA_Appv", "Term", "NoEmp", "CreateJob", "RetainedJob"],
+            columns=["GrAppv", "SBA_Appv", "Term", "NoEmp", "CreateJob", "RetainedJob"],
             lower_quantile=0.01,
             upper_quantile=0.99,
         )
@@ -567,7 +566,6 @@ def build_tree_feature_pipeline() -> Pipeline:
         # --- Tree-optimised ColumnTransformer ---
 
         continuous_features = [
-            "DisbursementGross",
             "GrAppv",
             "SBA_Appv",
             "GOV_Ratio",

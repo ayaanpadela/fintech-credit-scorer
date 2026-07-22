@@ -24,7 +24,7 @@ ARTIFACTS_DIR: Path = PROJECT_ROOT / "data" / "processed"
 # ---------------------------------------------------------------------------
 
 TARGET_COL: str = "is_default"
-DROP_COLS: list[str] = ["is_default", "MIS_Status"]
+DROP_COLS: list[str] = ["is_default", "MIS_Status","ApprovalDate"]
 SPLIT_RATIOS: tuple[float, float] = (0.70, 0.85)
 RANDOM_SEED: int = 42
 
@@ -33,13 +33,11 @@ RANDOM_SEED: int = 42
 # ---------------------------------------------------------------------------
 
 FINANCIAL_COLS: list[str] = [
-    "DisbursementGross",
     "GrAppv",
     "SBA_Appv",
 ]
 
 CONTINUOUS_FEATURES: list[str] = [
-    "DisbursementGross",
     "GrAppv",
     "SBA_Appv",
     "GOV_Ratio",
@@ -63,7 +61,6 @@ PASSTHROUGH_BINARY: list[str] = [
 ]
 
 WINSORIZE_COLS: list[str] = [
-    "DisbursementGross",
     "GrAppv",
     "SBA_Appv",
     "Term",

@@ -45,11 +45,11 @@ After expanding the feature pipeline to include domain-informed financial transf
 
 | Metric | Validation | OOT Test | Δ vs Initial (OOT) |
 |:--|:--:|:--:|:--:|
-| **ROC-AUC** | 0.8036 | 0.6876 | +0.1292 |
-| **PR-AUC** | 0.6260 | 0.4152 | — |
-| **Brier Score** | 0.2157 | 0.2516 | — |
+| **ROC-AUC** | 0.8042 | 0.6865 | +0.1281 |
+| **PR-AUC** | 0.6276 | 0.4146 | — |
+| **Brier Score** | 0.2164 | 0.2525 | — |
 | **F1 (Default)** | 0.67 | 0.55 | +0.08 |
-| **Precision (Default)** | 0.53 | 0.42 | +0.08 |
+| **Precision (Default)** | 0.52 | 0.41 | +0.07 |
 | **Recall (Default)** | 0.91 | 0.81 | +0.04 |
 
 **Why the improvement?** The initial baseline operated on a severely limited column map that excluded key financial predictors. The expanded pipeline unlocked signal from three sources: (1) **dollar-amount features** — disbursement, approval, and SBA guarantee amounts were trapped as unparseable currency strings (`'$60,000.00'`) until `FinancialCleaner` converted them to float64; (2) **engineered risk ratios** — `GOV_Ratio` (SBA guarantee proportion) and `is_backed` (long-term real-estate flag) capture structural loan risk the raw columns do not express; and (3) **cleaned categoricals** — `RevLineCr`, `LowDoc`, `NewExist`, and `NAICS` contained mixed-case values, undocumented sentinels, and high-cardinality codes that were either dropped or collapsed into noise before sanitization. The ~12-point ROC-AUC gap between validation (0.80) and OOT (0.69) reflects expected temporal drift across the chronological split and is the primary target for Phase 2 gradient boosting.
@@ -64,23 +64,23 @@ Phase 2 replaced the linear baseline with tree-based gradient boosting models, u
 
 | Metric | Validation | OOT Test | Δ vs Baseline LR (OOT) |
 |:--|:--:|:--:|:--:|
-| **ROC-AUC** | 0.9668 | 0.9390 | +0.2514 |
-| **PR-AUC** | 0.9208 | 0.8560 | +0.4408 |
-| **Brier Score** | 0.0648 | 0.0930 | −0.1586 |
+| **ROC-AUC** | 0.9664 | 0.9375 | +0.2510 |
+| **PR-AUC** | 0.9191 | 0.8524 | +0.4378 |
+| **Brier Score** | 0.0653 | 0.0943 | −0.1582 |
 | **F1 (Default)** | 0.89 | 0.81 | +0.26 |
-| **Precision (Default)** | 0.85 | 0.76 | +0.34 |
+| **Precision (Default)** | 0.84 | 0.75 | +0.34 |
 | **Recall (Default)** | 0.93 | 0.87 | +0.06 |
 
 ### LightGBM (default params, `is_unbalance=True`, early stopping @ 50 rounds)
 
 | Metric | Validation | OOT Test | Δ vs Baseline LR (OOT) |
 |:--|:--:|:--:|:--:|
-| **ROC-AUC** | 0.9657 | 0.9384 | +0.2508 |
-| **PR-AUC** | 0.9149 | 0.8468 | +0.4316 |
-| **Brier Score** | 0.0681 | 0.0987 | −0.1529 |
+| **ROC-AUC** | 0.9654 | 0.9371 | +0.2506 |
+| **PR-AUC** | 0.9151 | 0.8454 | +0.4308 |
+| **Brier Score** | 0.0690 | 0.1010 | −0.1515 |
 | **F1 (Default)** | 0.88 | 0.79 | +0.24 |
-| **Precision (Default)** | 0.82 | 0.72 | +0.30 |
-| **Recall (Default)** | 0.94 | 0.89 | +0.08 |
+| **Precision (Default)** | 0.82 | 0.71 | +0.30 |
+| **Recall (Default)** | 0.95 | 0.89 | +0.08 |
 
 ### Phase 2 Analysis
 
@@ -90,7 +90,7 @@ Even with **default hyperparameters and no tuning**, both gradient boosting mode
 2. **Generalisation gap compression** — The validation–OOT ROC-AUC gap shrank from ~12 points (LR: 0.80 → 0.69) to ~3 points (XGB: 0.97 → 0.94), indicating that the tree models are far more robust to temporal distribution shift.
 3. **Calibration improvement** — Brier scores dropped from 0.25 (LR) to 0.09 (XGB), meaning predicted probabilities of default are now well-calibrated and suitable for downstream risk pricing.
 
-XGBoost slightly outperforms LightGBM across all OOT metrics (ROC-AUC 0.9390 vs 0.9384, F1 0.81 vs 0.79) and is the current **Phase 2 champion model**. Both models were trained with default hyperparameters; further improvement via Optuna-based tuning (50 trials, search spaces defined in `config/settings.py`) is expected in an optional optimisation pass.
+XGBoost slightly outperforms LightGBM across all OOT metrics (ROC-AUC 0.9375 vs 0.9371, F1 0.81 vs 0.79) and is the current **Phase 2 champion model**. Both models were trained with default hyperparameters; further improvement via Optuna-based tuning (50 trials, search spaces defined in `config/settings.py`) is expected in an optional optimisation pass.
 
 ## Technology Stack
 *   **Core Language**: Python 3.12+
@@ -101,4 +101,4 @@ XGBoost slightly outperforms LightGBM across all OOT metrics (ROC-AUC 0.9390 vs 
 *   **Dependency Management**: `uv`
 
 ## Progress Summary
-Phases 1 and 2 are complete. The foundational project structure has been established (`src/`, `app/`, `tests/`, `notebooks/`). Core data pipelines, an expanded feature engineering pipeline (6 custom sklearn transformers, 614 lines), a cost-sensitive baseline Logistic Regression, and gradient boosting models (XGBoost and LightGBM) are in place. The Phase 2 XGBoost champion — trained with **default hyperparameters only** — achieves an OOT ROC-AUC of 0.9390, a +25-point improvement over the Phase 1 baseline (0.6876), with the validation–OOT gap compressed from ~12 points to ~3 points. Optuna hyperparameter tuning has not yet been applied and is expected to yield further gains. Next: Phase 3 (SHAP explainability and adverse action code mapping).
+Phases 1 and 2 are complete. The foundational project structure has been established (`src/`, `app/`, `tests/`, `notebooks/`). Core data pipelines, an expanded feature engineering pipeline (6 custom sklearn transformers, 614 lines), a cost-sensitive baseline Logistic Regression, and gradient boosting models (XGBoost and LightGBM) are in place. The Phase 2 XGBoost champion — trained with **default hyperparameters only** — achieves an OOT ROC-AUC of 0.9375, a +25-point improvement over the Phase 1 baseline (0.6865), with the validation–OOT gap compressed from ~12 points to ~3 points. Optuna hyperparameter tuning has not yet been applied and is expected to yield further gains. Next: Phase 3 (SHAP explainability and adverse action code mapping).

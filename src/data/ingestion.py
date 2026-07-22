@@ -35,6 +35,7 @@ class DataIngestor:
         current_year= datetime.date.today().year
         mask= df[self.date_column].dt.year> current_year
         df.loc[mask, self.date_column]= df.loc[mask,self.date_column]-pd.DateOffset(years=100)
+        df = df.drop(columns=["DisbursementDate"], errors="ignore")
         logging.info(f"Loaded {len(df)} records. Base Default Rate: {df['is_default'].mean():.2%}")
         return df
     
@@ -46,9 +47,9 @@ class DataIngestor:
         train_end = int(total_rows * 0.7)
         val_end = int(total_rows * 0.85)
         
-        train_set = df_sorted.iloc[:train_end].copy()
-        val_set = df_sorted.iloc[train_end:val_end].copy()
-        test_set = df_sorted.iloc[val_end:].copy()
+        train_set = df_sorted.iloc[:train_end].reset_index(drop=True).copy()
+        val_set   = df_sorted.iloc[train_end:val_end].reset_index(drop=True).copy()
+        test_set  = df_sorted.iloc[val_end:].reset_index(drop=True).copy()
         
         logging.info(f"Train: {len(train_set)} | Val: {len(val_set)} | OOT Test: {len(test_set)}")
         return train_set, val_set, test_set
