@@ -5,6 +5,15 @@ from sklearn.pipeline import Pipeline
 from sklearn.compose import ColumnTransformer
 from sklearn.preprocessing import StandardScaler, OneHotEncoder, OrdinalEncoder
 
+from config.settings import (
+    CATEGORICAL_FEATURES,
+    CATEGORICAL_VALUE_MAP,
+    CONTINUOUS_FEATURES,
+    FINANCIAL_COLS,
+    PASSTHROUGH_BINARY,
+    WINSORIZE_COLS,
+)
+
 class FinancialCleaner(BaseEstimator, TransformerMixin):
     """
     Stateless transformer that normalises raw currency strings into float64.
@@ -387,52 +396,29 @@ class OutlierWinsorizer(BaseEstimator, TransformerMixin):
         return X_copy
 
 
-def build_feature_pipeline() -> Pipeline:
+def _build_domain_stages() -> list[tuple[str, TransformerMixin]]:
     """
-    Assemble the full preprocessing pipeline for the SBA credit scoring model.
+    Build the six domain-specific transformer stages shared by both the
+    logistic-regression and tree-model feature pipelines.
 
-    Chains seven sequential stages into a single scikit-learn Pipeline
-    object. The pipeline is designed to be fit exclusively on the training
-    fold and applied as a stateless transform to validation and OOT sets,
-    preventing data leakage at every stage.
+    build_feature_pipeline() and build_tree_feature_pipeline() differ only
+    in their final ColumnTransformer (scaled + one-hot vs. passthrough +
+    ordinal), so this prefix is defined once and reused by both.
 
     Returns
     -------
-    Pipeline
-        Unfitted scikit-learn Pipeline. Call .fit_transform(X_train) once,
-        then .transform() on validation and OOT sets.
+    list[tuple[str, TransformerMixin]]
+        Named steps ready to prepend to a Pipeline, followed by whichever
+        final ColumnTransformer the caller assembles.
     """
-    # --- Transformer instantiation ---
-
-    financial_cols = ["GrAppv", "SBA_Appv"]
-    cleaner = FinancialCleaner(columns=financial_cols)
+    cleaner = FinancialCleaner(columns=FINANCIAL_COLS)
     naics_proc = NAICSProcessor(column="NAICS")
     risk_gen = RiskRatioGenerator()
 
     # RevLineCr and LowDoc: canonical values are Y/N; dirty values include
     # lowercase variants and undocumented sentinels ('T', 'S', 'C', '0').
     # NewExist: stored as float64 in the CSV, so str() yields '1.0'/'2.0'.
-    cat_sanitizer = CategoricalSanitizer(column_map={
-        "RevLineCr": {
-            "Y": "Y", "N": "N",
-            "y": "Y", "n": "N",
-            "0": "Unknown", "T": "Unknown",
-            "nan": "Unknown",
-        },
-        "LowDoc": {
-            "Y": "Y", "N": "N",
-            "y": "Y", "n": "N",
-            "S": "Unknown", "C": "Unknown",
-            "0": "Unknown",
-            "nan": "Unknown",
-        },
-        "NewExist": {
-            "1": "Existing", "1.0": "Existing",
-            "2": "New",      "2.0": "New",
-            "0": "Unknown",
-            "nan": "Unknown",
-        },
-    })
+    cat_sanitizer = CategoricalSanitizer(column_map=CATEGORICAL_VALUE_MAP)
 
     # FranchiseCode > 1 indicates an active franchise relationship.
     # Codes 0 and 1 are the SBA's placeholders for non-franchise loans.
@@ -441,172 +427,93 @@ def build_feature_pipeline() -> Pipeline:
     # GOV_Ratio is excluded: bounded [0, 1] by construction in RiskRatioGenerator.
     # is_franchise is excluded: binary flag, winsorizing would be a no-op.
     winsorizer = OutlierWinsorizer(
-        columns=["GrAppv", "SBA_Appv", "Term", "NoEmp", "CreateJob", "RetainedJob"],
+        columns=WINSORIZE_COLS,
         lower_quantile=0.01,
         upper_quantile=0.99,
     )
 
-    # --- ColumnTransformer column routing ---
-
-    # Scaled continuous features — post-cleaning and post-winsorization.
-    continuous_features = [
-        "GrAppv",             # Gross amount approved by bank
-        "SBA_Appv",           # Amount guaranteed by SBA
-        "GOV_Ratio",          # SBA guarantee proportion (engineered)
-        "Term",               # Loan term in months
-        "NoEmp",              # Number of employees at origination
-        "CreateJob",          # Projected jobs to be created
-        "RetainedJob",        # Projected jobs to be retained
+    return [
+        ("financial_cleanup", cleaner),
+        ("naics_reduction", naics_proc),
+        ("risk_engineering", risk_gen),
+        ("categorical_sanitization", cat_sanitizer),
+        ("franchise_encoding", franchise_enc),
+        ("outlier_winsorization", winsorizer),
     ]
 
-    # One-hot encoded categoricals — post-sanitization.
-    # handle_unknown='ignore' silently drops unseen categories at inference,
-    # which is the correct behaviour for OOT data.
-    categorical_features = [
-        "NAICS",      # 2-digit macro-sector (post NAICSProcessor)
-        "RevLineCr",  # Revolving line of credit flag (post CategoricalSanitizer)
-        "LowDoc",     # LowDoc programme flag (post CategoricalSanitizer)
-        "NewExist",   # New vs existing business (post CategoricalSanitizer)
-    ]
 
+def build_feature_pipeline() -> Pipeline:
+    """
+    Assemble the full preprocessing pipeline for the SBA credit scoring model.
+
+    Chains the shared six-stage domain prefix (see _build_domain_stages())
+    with a final ColumnTransformer that scales continuous features and
+    one-hot encodes categoricals — the encoding a linear model needs. The
+    pipeline is designed to be fit exclusively on the training fold and
+    applied as a stateless transform to validation and OOT sets,
+    preventing data leakage at every stage.
+
+    Returns
+    -------
+    Pipeline
+        Unfitted scikit-learn Pipeline. Call .fit_transform(X_train) once,
+        then .transform() on validation and OOT sets.
+    """
     # Binary flags passed through without transformation.
     # UrbanRural (0/1/2) is ordinal by SBA definition and treated as
     # a raw numeric pass-through rather than one-hot encoded.
-    passthrough_binary = [
-        "is_backed",    # Long-term / real-estate backed loan (from RiskRatioGenerator)
-        "UrbanRural",   # Urban (1) / Rural (2) / Undefined (0)
-        "is_franchise", # Franchised borrower flag (from FranchiseEncoder)
-    ]
-
     preprocessor = ColumnTransformer(
         transformers=[
-            ("num",  StandardScaler(),                                          continuous_features),
-            ("cat",  OneHotEncoder(handle_unknown="ignore", sparse_output=False), categorical_features),
-            ("pass", "passthrough",                                             passthrough_binary),
+            ("num", StandardScaler(), CONTINUOUS_FEATURES),
+            ("cat", OneHotEncoder(handle_unknown="ignore", sparse_output=False), CATEGORICAL_FEATURES),
+            ("pass", "passthrough", PASSTHROUGH_BINARY),
         ],
         remainder="drop",  # Discards IDs, dates, raw target columns, and FranchiseCode
     )
 
-    # --- Final pipeline assembly ---
-
     master_pipeline = Pipeline(steps=[
-        ("financial_cleanup",        cleaner),
-        ("naics_reduction",          naics_proc),
-        ("risk_engineering",         risk_gen),
-        ("categorical_sanitization", cat_sanitizer),
-        ("franchise_encoding",       franchise_enc),
-        ("outlier_winsorization",    winsorizer),
+        *_build_domain_stages(),
         ("statistical_preprocessing", preprocessor),
     ])
 
     return master_pipeline
 
+
 def build_tree_feature_pipeline() -> Pipeline:
-        """
-        Assemble a tree-model-optimised preprocessing pipeline.
+    """
+    Assemble a tree-model-optimised preprocessing pipeline.
 
-        Reuses the same six domain-specific transformer stages as
-        build_feature_pipeline() (FinancialCleaner → NAICSProcessor →
-        RiskRatioGenerator → CategoricalSanitizer → FranchiseEncoder →
-        OutlierWinsorizer), but replaces the final ColumnTransformer
-        with a tree-friendly variant:
+    Reuses the same six domain-specific transformer stages as
+    build_feature_pipeline() (see _build_domain_stages()), but replaces
+    the final ColumnTransformer with a tree-friendly variant:
 
-            - No StandardScaler (trees are scale-invariant)
-            - OrdinalEncoder instead of OneHotEncoder (preserves split
-              efficiency and reduces dimensionality)
-            - passthrough for continuous and binary features
+        - No StandardScaler (trees are scale-invariant)
+        - OrdinalEncoder instead of OneHotEncoder (preserves split
+          efficiency and reduces dimensionality)
+        - passthrough for continuous and binary features
 
-        This pipeline is designed for XGBoost and LightGBM consumers.
-        The existing build_feature_pipeline() remains the Phase 1 artifact
-        for the Logistic Regression baseline and must not be modified.
+    This pipeline is designed for XGBoost and LightGBM consumers.
+    The existing build_feature_pipeline() remains the Phase 1 artifact
+    for the Logistic Regression baseline and must not be modified.
 
-        Returns
-        -------
-        Pipeline
-            Unfitted scikit-learn Pipeline. Call .fit_transform(X_train) once,
-            then .transform() on validation and OOT sets.
-        """
-        # --- Transformer instantiation (identical to build_feature_pipeline) ---
+    Returns
+    -------
+    Pipeline
+        Unfitted scikit-learn Pipeline. Call .fit_transform(X_train) once,
+        then .transform() on validation and OOT sets.
+    """
+    preprocessor = ColumnTransformer(
+        transformers=[
+            ("num", "passthrough", CONTINUOUS_FEATURES),
+            ("cat", OrdinalEncoder(handle_unknown="use_encoded_value", unknown_value=-1), CATEGORICAL_FEATURES),
+            ("pass", "passthrough", PASSTHROUGH_BINARY),
+        ],
+        remainder="drop",
+    )
 
-        financial_cols = ["GrAppv", "SBA_Appv"]
-        cleaner = FinancialCleaner(columns=financial_cols)
-        naics_proc = NAICSProcessor(column="NAICS")
-        risk_gen = RiskRatioGenerator()
+    tree_pipeline = Pipeline(steps=[
+        *_build_domain_stages(),
+        ("tree_preprocessing", preprocessor),
+    ])
 
-        cat_sanitizer = CategoricalSanitizer(column_map={
-            "RevLineCr": {
-                "Y": "Y", "N": "N",
-                "y": "Y", "n": "N",
-                "0": "Unknown", "T": "Unknown",
-                "nan": "Unknown",
-            },
-            "LowDoc": {
-                "Y": "Y", "N": "N",
-                "y": "Y", "n": "N",
-                "S": "Unknown", "C": "Unknown",
-                "0": "Unknown",
-                "nan": "Unknown",
-            },
-            "NewExist": {
-                "1": "Existing", "1.0": "Existing",
-                "2": "New",      "2.0": "New",
-                "0": "Unknown",
-                "nan": "Unknown",
-            },
-        })
-
-        franchise_enc = FranchiseEncoder(column="FranchiseCode", threshold=1)
-
-        winsorizer = OutlierWinsorizer(
-            columns=["GrAppv", "SBA_Appv", "Term", "NoEmp", "CreateJob", "RetainedJob"],
-            lower_quantile=0.01,
-            upper_quantile=0.99,
-        )
-
-        # --- Tree-optimised ColumnTransformer ---
-
-        continuous_features = [
-            "GrAppv",
-            "SBA_Appv",
-            "GOV_Ratio",
-            "Term",
-            "NoEmp",
-            "CreateJob",
-            "RetainedJob",
-        ]
-
-        categorical_features = [
-            "NAICS",
-            "RevLineCr",
-            "LowDoc",
-            "NewExist",
-        ]
-
-        passthrough_binary = [
-            "is_backed",
-            "UrbanRural",
-            "is_franchise",
-        ]
-
-        preprocessor = ColumnTransformer(
-            transformers=[
-                ("num","passthrough",continuous_features),
-                ("cat",OrdinalEncoder(handle_unknown="use_encoded_value",unknown_value=-1),categorical_features),
-                ("pass", "passthrough",passthrough_binary),
-            ],
-            remainder="drop",
-        )
-
-        # --- Final pipeline assembly ---
-
-        tree_pipeline = Pipeline(steps=[
-            ("financial_cleanup",        cleaner),
-            ("naics_reduction",          naics_proc),
-            ("risk_engineering",         risk_gen),
-            ("categorical_sanitization", cat_sanitizer),
-            ("franchise_encoding",       franchise_enc),
-            ("outlier_winsorization",    winsorizer),
-            ("tree_preprocessing",       preprocessor),
-        ])
-
-        return tree_pipeline
+    return tree_pipeline
