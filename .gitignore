@@ -20,9 +20,9 @@ __pycache__/
 # Data & ML Artifacts (Critical for your Credit Scorer)
 data/raw/
 data/processed/
-models/
+/models/
 *.csv
 *.parquet
 *.pkl
 *.joblib
-FinTech Credit Scorer API Guide.md
+tmp/
