@@ -23,10 +23,29 @@ ARTIFACTS_DIR: Path = PROJECT_ROOT / "data" / "processed"
 # Data splitting
 # ---------------------------------------------------------------------------
 
+CENTURY_CUTOFF_YEAR: int = 2026
 TARGET_COL: str = "is_default"
-DROP_COLS: list[str] = ["is_default", "MIS_Status","ApprovalDate"]
+DROP_COLS: list[str] = ["is_default", "MIS_Status", "ApprovalDate"]
 SPLIT_RATIOS: tuple[float, float] = (0.70, 0.85)
 RANDOM_SEED: int = 42
+
+# Columns that are only known once a loan's outcome is already determined.
+# Including any of these as model features would leak the target. Dropped
+# unconditionally in DataIngestor.clean(), independent of which features
+# the downstream pipeline happens to select.
+POST_OUTCOME_COLS: list[str] = [
+    "ChgOffDate",
+    "ChgOffPrinGr",
+    "BalanceGross",
+    "DisbursementGross",
+    "DisbursementDate",
+]
+
+# Sanity band for the engineered target's positive rate. If a schema or
+# encoding change silently alters how "CHGOFF" is represented in
+# MIS_Status, the resulting positive rate should fail loudly rather than
+# silently train a model on a corrupted target.
+POSITIVE_RATE_BOUNDS: tuple[float, float] = (0.05, 0.40)
 
 # ---------------------------------------------------------------------------
 # Feature column registries
@@ -68,6 +87,31 @@ WINSORIZE_COLS: list[str] = [
     "CreateJob",
     "RetainedJob",
 ]
+
+# Allow-list mapping consumed by CategoricalSanitizer: column -> {raw
+# value: canonical value}. Values absent from a column's map are filled
+# with "Unknown" by the transformer.
+CATEGORICAL_VALUE_MAP: dict[str, dict[str, str]] = {
+    "RevLineCr": {
+        "Y": "Y", "N": "N",
+        "y": "Y", "n": "N",
+        "0": "Unknown", "T": "Unknown",
+        "nan": "Unknown",
+    },
+    "LowDoc": {
+        "Y": "Y", "N": "N",
+        "y": "Y", "n": "N",
+        "S": "Unknown", "C": "Unknown",
+        "0": "Unknown",
+        "nan": "Unknown",
+    },
+    "NewExist": {
+        "1": "Existing", "1.0": "Existing",
+        "2": "New",      "2.0": "New",
+        "0": "Unknown",
+        "nan": "Unknown",
+    },
+}
 
 # ---------------------------------------------------------------------------
 # Hyperparameter tuning

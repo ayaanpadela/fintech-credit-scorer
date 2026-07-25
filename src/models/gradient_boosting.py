@@ -7,30 +7,27 @@ src/models/baseline.py, substituting the tree-optimised feature pipeline
 and gradient boosting classifiers for the Logistic Regression baseline.
 """
 import logging
-from pathlib import Path
 from typing import Any
 
 import joblib
 import numpy as np
 import pandas as pd
+from lightgbm import LGBMClassifier, early_stopping
 from sklearn.pipeline import Pipeline
 from xgboost import XGBClassifier
-from lightgbm import LGBMClassifier
 
 from config.settings import (
     ARTIFACTS_DIR,
     DROP_COLS,
     EARLY_STOPPING_ROUNDS,
-    PROJECT_ROOT,
-    RAW_DATA_PATH,
     RANDOM_SEED,
+    RAW_DATA_PATH,
     TARGET_COL,
 )
 from src.data.ingestion import DataIngestor
+from src.evaluation.metrics import evaluate_model_on_splits, persist_metrics
 from src.features.engineering import build_tree_feature_pipeline
-from src.evaluation.metrics import evaluate_model_on_splits
 
-logging.basicConfig(level=logging.INFO, format="%(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
 
 
@@ -62,16 +59,10 @@ def _prepare_data() -> tuple[
         y_test : pd.Series
         pipeline : Pipeline (fitted)
     """
-    # TODO: Implement data loading, splitting, and pipeline fitting.
-    # Follow the same pattern as baseline.py:
-    #   1. DataIngestor(RAW_DATA_PATH).clean()
-    #   2. .chronological_split(df_clean)
-    #   3. Isolate X/y using TARGET_COL and DROP_COLS
-    #   4. build_tree_feature_pipeline().fit_transform(X_train)
-    #   5. pipeline.transform(X_val), pipeline.transform(X_test)
     ingestor = DataIngestor(RAW_DATA_PATH)
     df_clean = ingestor.clean()
     train_set, val_set, test_set = ingestor.chronological_split(df=df_clean)
+
     y_train = train_set[TARGET_COL].copy()
     X_train = train_set.drop(columns=DROP_COLS).copy()
 
@@ -80,12 +71,18 @@ def _prepare_data() -> tuple[
 
     y_test = test_set[TARGET_COL].copy()
     X_test = test_set.drop(columns=DROP_COLS).copy()
-    tree_pipeline= build_tree_feature_pipeline()
-    X_train_processed=tree_pipeline.fit_transform(X_train)
-    X_val_processed= tree_pipeline.transform(X_val)
-    X_test_processed= tree_pipeline.transform(X_test)
 
-    return (X_train_processed,y_train,X_val_processed,y_val,X_test_processed,y_test,tree_pipeline)
+    tree_pipeline = build_tree_feature_pipeline()
+    X_train_processed = tree_pipeline.fit_transform(X_train)
+    X_val_processed = tree_pipeline.transform(X_val)
+    X_test_processed = tree_pipeline.transform(X_test)
+
+    return (
+        X_train_processed, y_train,
+        X_val_processed, y_val,
+        X_test_processed, y_test,
+        tree_pipeline,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -93,6 +90,7 @@ def _prepare_data() -> tuple[
 # ---------------------------------------------------------------------------
 
 def train_xgboost(
+    prepared: tuple | None = None,
     params: dict[str, Any] | None = None,
 ) -> tuple[XGBClassifier, Pipeline, dict[str, dict[str, float]]]:
     """
@@ -104,6 +102,11 @@ def train_xgboost(
 
     Parameters
     ----------
+    prepared : tuple or None
+        Pre-computed output of _prepare_data(), as returned when calling
+        from __main__ alongside train_lightgbm(). If None, this function
+        calls _prepare_data() itself (e.g. when called standalone from
+        the tuning module).
     params : dict[str, Any] or None
         XGBoost hyperparameters. If None, uses sensible defaults.
         When called from the tuning module, this contains the
@@ -115,46 +118,34 @@ def train_xgboost(
         The fitted model, fitted pipeline, and evaluation metrics
         keyed by split name ("Validation", "OOT Test").
     """
-    # TODO: Implement XGBoost training.
-    # Steps:
-    #   1. Call _prepare_data() to get processed matrices
-    #   2. Compute scale_pos_weight = count(y=0) / count(y=1)
-    #   3. Merge default params with any provided params
-    #   4. Instantiate XGBClassifier with:
-    #      - scale_pos_weight
-    #      - early_stopping_rounds=EARLY_STOPPING_ROUNDS
-    #      - eval_metric="logloss"
-    #      - random_state=RANDOM_SEED
-    #      - tree_method="hist"
-    #   5. model.fit(X_train, y_train, eval_set=[(X_val, y_val)])
-    #   6. Evaluate using evaluate_model_on_splits()
-    #   7. Serialize artifacts
     (
-        X_train,
-        y_train,
-        X_val,
-        y_val,
-        X_test,
-        y_test,
-        tree_pipeline
-    ) = _prepare_data()
-    counts = y_train.value_counts().reindex([0, 1], fill_value=0)
-    scale_pos_weight = counts[0]/counts[1]
-    model_params = {
-    "scale_pos_weight": scale_pos_weight,
-    "early_stopping_rounds": EARLY_STOPPING_ROUNDS,
-    "eval_metric": "logloss",
-    "random_state": RANDOM_SEED,
-    "tree_method": "hist"
-    }
+        X_train, y_train,
+        X_val, y_val,
+        X_test, y_test,
+        tree_pipeline,
+    ) = prepared if prepared is not None else _prepare_data()
 
+    counts = y_train.value_counts().reindex([0, 1], fill_value=0)
+    scale_pos_weight = counts[0] / counts[1]
+
+    model_params = {
+        "scale_pos_weight": scale_pos_weight,
+        "early_stopping_rounds": EARLY_STOPPING_ROUNDS,
+        "eval_metric": "logloss",
+        "random_state": RANDOM_SEED,
+        "tree_method": "hist",
+    }
     if params is not None:
         model_params.update(params)
-    xgbmodel= XGBClassifier(**model_params)
-    xgbmodel.fit(X_train,y_train,eval_set=[(X_val,y_val)])
-    metrics=evaluate_model_on_splits(xgbmodel,{"Validation":(X_val,y_val),"OOT Test":(X_test,y_test)})
-    _serialize_artifacts(xgbmodel,tree_pipeline,"xgb_model")
-    return (xgbmodel,tree_pipeline,metrics)
+
+    model = XGBClassifier(**model_params)
+    model.fit(X_train, y_train, eval_set=[(X_val, y_val)])
+
+    eval_splits = {"Validation": (X_val, y_val), "OOT Test": (X_test, y_test)}
+    metrics = evaluate_model_on_splits(model, eval_splits)
+    persist_metrics("xgb_model", metrics, eval_splits)
+    _serialize_model(model, "xgb_model")
+    return model, tree_pipeline, metrics
 
 
 # ---------------------------------------------------------------------------
@@ -162,6 +153,7 @@ def train_xgboost(
 # ---------------------------------------------------------------------------
 
 def train_lightgbm(
+    prepared: tuple | None = None,
     params: dict[str, Any] | None = None,
 ) -> tuple[LGBMClassifier, Pipeline, dict[str, dict[str, float]]]:
     """
@@ -173,6 +165,11 @@ def train_lightgbm(
 
     Parameters
     ----------
+    prepared : tuple or None
+        Pre-computed output of _prepare_data(), as returned when calling
+        from __main__ alongside train_xgboost(). If None, this function
+        calls _prepare_data() itself (e.g. when called standalone from
+        the tuning module).
     params : dict[str, Any] or None
         LightGBM hyperparameters. If None, uses sensible defaults.
         When called from the tuning module, this contains the
@@ -184,79 +181,89 @@ def train_lightgbm(
         The fitted model, fitted pipeline, and evaluation metrics
         keyed by split name ("Validation", "OOT Test").
     """
-    # TODO: Implement LightGBM training.
-    # Steps:
-    #   1. Call _prepare_data() to get processed matrices
-    #   2. Merge default params with any provided params
-    #   3. Instantiate LGBMClassifier with:
-    #      - is_unbalance=True
-    #      - random_state=RANDOM_SEED
-    #      - verbosity=-1
-    #   4. model.fit(X_train, y_train,
-    #                eval_set=[(X_val, y_val)],
-    #                callbacks=[early_stopping(EARLY_STOPPING_ROUNDS)])
-    #   5. Evaluate using evaluate_model_on_splits()
-    #   6. Serialize artifacts
     (
-        X_train,
-        y_train,
-        X_val,
-        y_val,
-        X_test,
-        y_test,
-        tree_pipeline
-    ) = _prepare_data()
-    model_params={
-        "is_unbalance":True,
+        X_train, y_train,
+        X_val, y_val,
+        X_test, y_test,
+        tree_pipeline,
+    ) = prepared if prepared is not None else _prepare_data()
+
+    model_params = {
+        "is_unbalance": True,
         "random_state": RANDOM_SEED,
-        "verbosity":-1
+        "verbosity": -1,
     }
     if params is not None:
         model_params.update(params)
-    lightgbm= LGBMClassifier(**model_params)
-    lightgbm.fit(X_train,y_train,eval_set=[(X_val,y_val)])
-    metrics=evaluate_model_on_splits(lightgbm,{"Validation":(X_val,y_val),"OOT Test":(X_test,y_test)})
-    _serialize_artifacts(lightgbm,tree_pipeline,"lgb_model")
-    return (lightgbm,tree_pipeline,metrics)
+
+    model = LGBMClassifier(**model_params)
+    # eval_set alone only records history — early_stopping must be passed
+    # as a callback or LightGBM trains for the full n_estimators regardless
+    # of validation performance.
+    model.fit(
+        X_train, y_train,
+        eval_set=[(X_val, y_val)],
+        callbacks=[early_stopping(EARLY_STOPPING_ROUNDS)],
+    )
+
+    eval_splits = {"Validation": (X_val, y_val), "OOT Test": (X_test, y_test)}
+    metrics = evaluate_model_on_splits(model, eval_splits)
+    persist_metrics("lgb_model", metrics, eval_splits)
+    _serialize_model(model, "lgb_model")
+    return model, tree_pipeline, metrics
+
 
 # ---------------------------------------------------------------------------
 # Artifact serialization
 # ---------------------------------------------------------------------------
 
-def _serialize_artifacts(
-    model: XGBClassifier | LGBMClassifier,
-    pipeline: Pipeline,
-    model_name: str,
-) -> None:
+def _serialize_model(model: XGBClassifier | LGBMClassifier, model_name: str) -> None:
     """
-    Persist the fitted model and tree pipeline to disk.
+    Persist a fitted model to disk.
 
     Parameters
     ----------
     model : XGBClassifier or LGBMClassifier
         The fitted gradient boosting classifier.
-    pipeline : Pipeline
-        The fitted tree feature preprocessing pipeline.
     model_name : str
         Base name for the serialized file (e.g., "xgb_model", "lgb_model").
     """
-    # TODO: Implement serialization.
-    # Steps:
-    #   1. ARTIFACTS_DIR.mkdir(parents=True, exist_ok=True)
-    #   2. joblib.dump(model, ARTIFACTS_DIR / f"{model_name}.joblib")
-    #   3. joblib.dump(pipeline, ARTIFACTS_DIR / "tree_pipeline.joblib")
-    #   4. Log saved paths
-    ARTIFACTS_DIR.mkdir(parents=True,exist_ok=True)
-    joblib.dump(pipeline, ARTIFACTS_DIR/"tree_pipeline.joblib")
-    logger.info("Saved feature pipeline → %s",ARTIFACTS_DIR/"tree_pipeline.joblib")
+    ARTIFACTS_DIR.mkdir(parents=True, exist_ok=True)
+    model_path = ARTIFACTS_DIR / f"{model_name}.joblib"
+    joblib.dump(model, model_path)
+    logger.info("Saved %s model → %s", model_name, model_path)
 
-    joblib.dump(model, ARTIFACTS_DIR/f"{model_name}.joblib")
-    logger.info("Saved baseline model   → %s", ARTIFACTS_DIR/f"{model_name}.joblib")
-    pass
+
+def _serialize_pipeline(pipeline: Pipeline) -> None:
+    """
+    Persist the shared tree feature pipeline to disk.
+
+    Both XGBoost and LightGBM are trained on the same tree-optimised
+    pipeline, so this is called once per __main__ run rather than once
+    per model — a second call would just overwrite the first with an
+    identical pipeline fitted on the same training fold.
+
+    Parameters
+    ----------
+    pipeline : Pipeline
+        The fitted tree feature preprocessing pipeline.
+    """
+    ARTIFACTS_DIR.mkdir(parents=True, exist_ok=True)
+    pipeline_path = ARTIFACTS_DIR / "tree_pipeline.joblib"
+    joblib.dump(pipeline, pipeline_path)
+    logger.info("Saved tree feature pipeline → %s", pipeline_path)
+
+
 # ---------------------------------------------------------------------------
 # CLI entry point
 # ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
-    train_xgboost()
-    train_lightgbm()
+    from src.utils.logging import configure_logging
+
+    configure_logging()
+
+    prepared = _prepare_data()
+    _serialize_pipeline(prepared[-1])
+    train_xgboost(prepared=prepared)
+    train_lightgbm(prepared=prepared)
