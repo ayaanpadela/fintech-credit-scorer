@@ -71,11 +71,11 @@ CATEGORICAL_FEATURES: list[str] = [
     "RevLineCr",
     "LowDoc",
     "NewExist",
+    "UrbanRural"
 ]
 
 PASSTHROUGH_BINARY: list[str] = [
     "is_backed",
-    "UrbanRural",
     "is_franchise",
 ]
 

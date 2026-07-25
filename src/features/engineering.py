@@ -4,7 +4,7 @@ from sklearn.base import BaseEstimator, TransformerMixin
 from sklearn.pipeline import Pipeline
 from sklearn.compose import ColumnTransformer
 from sklearn.preprocessing import StandardScaler, OneHotEncoder, OrdinalEncoder
-
+from sklearn.utils.validation import check_is_fitted
 from config.settings import (
     CATEGORICAL_FEATURES,
     CATEGORICAL_VALUE_MAP,
@@ -38,9 +38,12 @@ class FinancialCleaner(BaseEstimator, TransformerMixin):
 
     def fit(self, X: pd.DataFrame, y: pd.Series | None = None) -> "FinancialCleaner":
         """
-        No-op. This transformer is stateless — all cleaning rules are
-        deterministic and require no parameters learned from the data.
+        Records the full incoming column set (this transformer only
+        mutates self.columns in place and passes the rest through
+        unchanged, so get_feature_names_out needs to know the whole
+        input, not just the columns it touches).
         """
+        self.feature_names_in_ = np.asarray(X.columns)
         return self
 
     def transform(self, X: pd.DataFrame) -> pd.DataFrame:
@@ -62,8 +65,15 @@ class FinancialCleaner(BaseEstimator, TransformerMixin):
         """
         X_copy = X.copy()
         for col in self.columns:
-            X_copy[col] = X_copy[col].str.replace(r"[\$,]", "", regex=True).astype("float64")
+            if pd.api.types.is_object_dtype(X_copy[col]) or pd.api.types.is_string_dtype(X_copy[col]):
+                X_copy[col] = X_copy[col].str.replace(r"[\$,]", "", regex=True)
+            X_copy[col] = pd.to_numeric(X_copy[col], errors='coerce')
         return X_copy
+
+    def get_feature_names_out(self, input_features=None) -> np.ndarray:
+        if input_features is None:
+            input_features = self.feature_names_in_
+        return np.asarray(list(input_features))
 
 
 class NAICSProcessor(BaseEstimator, TransformerMixin):
@@ -91,9 +101,12 @@ class NAICSProcessor(BaseEstimator, TransformerMixin):
 
     def fit(self, X: pd.DataFrame, y: pd.Series | None = None) -> "NAICSProcessor":
         """
-        No-op. Mapping rules are deterministic and require no training-set
-        statistics.
+        Records the full incoming column set (this transformer only
+        rewrites self.column in place and passes the rest through
+        unchanged, so get_feature_names_out needs to know the whole
+        input, not just the column it touches).
         """
+        self.feature_names_in_ = np.asarray(X.columns)
         return self
 
     def transform(self, X: pd.DataFrame) -> pd.DataFrame:
@@ -115,14 +128,19 @@ class NAICSProcessor(BaseEstimator, TransformerMixin):
         pd.DataFrame
             DataFrame with NAICS replaced by 2-character sector string.
         """
-        X_copy = X.copy()
-        X_copy[self.column] = (
-            X_copy[self.column]
+        
+        X[self.column] = (
+            X[self.column]
             .astype("str")
             .str[:2]
             .replace({"0": "Unknown", "00": "Unknown", "na": "Unknown"})
         )
-        return X_copy
+        return X
+
+    def get_feature_names_out(self, input_features=None) -> np.ndarray:
+        if input_features is None:
+            input_features = self.feature_names_in_
+        return np.asarray(list(input_features))
 
 
 class RiskRatioGenerator(BaseEstimator, TransformerMixin):
@@ -171,15 +189,19 @@ class RiskRatioGenerator(BaseEstimator, TransformerMixin):
             DataFrame with two additional columns: 'GOV_Ratio' (float64)
             and 'is_backed' (int, 0 or 1).
         """
-        X_copy = X.copy()
-        X_copy["GOV_Ratio"] = np.where(
-            X_copy["GrAppv"] != 0,
-            X_copy["SBA_Appv"] / X_copy["GrAppv"],
+        
+        X["GOV_Ratio"] = np.where(
+            X["GrAppv"] != 0,
+            X["SBA_Appv"] / X["GrAppv"],
             0.0,
         )
-        X_copy["is_backed"] = np.where(X_copy["Term"] >= 240, 1, 0)
-        return X_copy
+        X["is_backed"] = np.where(X["Term"] >= 240, 1, 0)
+        return X
 
+    def get_feature_names_out(self, input_features=None) -> np.ndarray:
+        if input_features is None:
+            input_features = []
+        return np.asarray(list(input_features) + ["GOV_Ratio", "is_backed"])
 
 class CategoricalSanitizer(BaseEstimator, TransformerMixin):
     """
@@ -210,9 +232,12 @@ class CategoricalSanitizer(BaseEstimator, TransformerMixin):
 
     def fit(self, X: pd.DataFrame, y: pd.Series | None = None) -> "CategoricalSanitizer":
         """
-        No-op. The allow-list mapping is fully specified at construction
-        time and requires no statistics from the training data.
+        Records the full incoming column set (this transformer only
+        remaps the columns in column_map in place and passes the rest
+        through unchanged, so get_feature_names_out needs to know the
+        whole input, not just the columns it touches).
         """
+        self.feature_names_in_ = np.asarray(X.columns)
         return self
 
     def transform(self, X: pd.DataFrame) -> pd.DataFrame:
@@ -234,16 +259,21 @@ class CategoricalSanitizer(BaseEstimator, TransformerMixin):
             DataFrame with each mapped column replaced by its canonical
             string category. Unmapped values become 'Unknown'.
         """
-        X_copy = X.copy()
+        
         for col, mapping_dict in self.column_map.items():
-            if col in X_copy.columns:
-                X_copy[col] = (
-                    X_copy[col]
+            if col in X.columns:
+                X[col] = (
+                    X[col]
                     .astype(str)
                     .map(mapping_dict)
                     .fillna("Unknown")
                 )
-        return X_copy
+        return X
+
+    def get_feature_names_out(self, input_features=None) -> np.ndarray:
+        if input_features is None:
+            input_features = self.feature_names_in_
+        return np.asarray(list(input_features))
 
 
 class FranchiseEncoder(BaseEstimator, TransformerMixin):
@@ -291,9 +321,14 @@ class FranchiseEncoder(BaseEstimator, TransformerMixin):
         pd.DataFrame
             DataFrame with an additional 'is_franchise' column (int, 0 or 1).
         """
-        X_copy = X.copy()
-        X_copy["is_franchise"] = np.where(X_copy[self.column] > self.threshold, 1, 0)
-        return X_copy
+        
+        X["is_franchise"] = np.where(X[self.column] > self.threshold, 1, 0)
+        return X
+
+    def get_feature_names_out(self, input_features=None) -> np.ndarray:
+        if input_features is None:
+            input_features = []
+        return np.asarray(list(input_features) + ["is_franchise"])
 
 
 class OutlierWinsorizer(BaseEstimator, TransformerMixin):
@@ -366,6 +401,11 @@ class OutlierWinsorizer(BaseEstimator, TransformerMixin):
             )
             for col in self.columns
         }
+        # Full incoming column set: this transformer only clips self.columns
+        # in place and passes the rest through unchanged, so
+        # get_feature_names_out needs to know the whole input, not just
+        # the columns it touches.
+        self.feature_names_in_ = np.asarray(X.columns)
         return self
 
     def transform(self, X: pd.DataFrame) -> pd.DataFrame:
@@ -383,17 +423,21 @@ class OutlierWinsorizer(BaseEstimator, TransformerMixin):
         pd.DataFrame
             DataFrame with extreme values clipped to [lower, upper] per column.
 
-        Raises
+        Raises 
         ------
-        KeyError
-            If transform() is called before fit(), or if X is missing a
-            column that was present during fit().
+        NotFittedError if transform is called before fit()
         """
-        X_copy = X.copy()
+        check_is_fitted(self, "bounds_")
+        
         for col in self.columns:
             lower, upper = self.bounds_[col]
-            X_copy[col] = np.clip(X_copy[col], lower, upper)
-        return X_copy
+            X[col] = np.clip(X[col], lower, upper)
+        return X
+
+    def get_feature_names_out(self, input_features=None) -> np.ndarray:
+        if input_features is None:
+            input_features = self.feature_names_in_
+        return np.asarray(list(input_features))
 
 
 def _build_domain_stages() -> list[tuple[str, TransformerMixin]]:
@@ -459,14 +503,11 @@ def build_feature_pipeline() -> Pipeline:
         Unfitted scikit-learn Pipeline. Call .fit_transform(X_train) once,
         then .transform() on validation and OOT sets.
     """
-    # Binary flags passed through without transformation.
-    # UrbanRural (0/1/2) is ordinal by SBA definition and treated as
-    # a raw numeric pass-through rather than one-hot encoded.
     preprocessor = ColumnTransformer(
         transformers=[
             ("num", StandardScaler(), CONTINUOUS_FEATURES),
             ("cat", OneHotEncoder(handle_unknown="ignore", sparse_output=False), CATEGORICAL_FEATURES),
-            ("pass", "passthrough", PASSTHROUGH_BINARY),
+            ("pass", StandardScaler(), PASSTHROUGH_BINARY),
         ],
         remainder="drop",  # Discards IDs, dates, raw target columns, and FranchiseCode
     )
